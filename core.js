@@ -72,8 +72,30 @@ export function currentWeight(state, date) {
   if (t) return t.value;
   return state.weights.filter(w => w.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0]?.kg ?? null;
 }
-export function computePlan(plan, kg, date) {
-  const bmr = 10 * kg + 6.25 * plan.height - 5 * plan.age + (plan.sex === 'male' ? 5 : -161), tdee = bmr * ACTIVITY[plan.activity];
+// 記録からの消費カロリー（実績）：直近4週間の「平均摂取カロリー − 体重の増減ぶんのカロリー」。
+// 体重の増減は実測値の回帰直線の傾きから求める。食事は、記録があり、カロリー不明の品がない日だけを使う（今日は完了済みのときだけ）。
+export const ADAPT = { window: 28, minSpan: 14, minWeighIns: 6, minIntakeDays: 10 };
+export function adaptiveTdee(state, date) {
+  const dayNo = d => Math.round(Date.parse(`${d}T12:00:00Z`) / 86400000), from = shiftDay(date, -ADAPT.window);
+  const ws = state.weights.filter(w => w.date >= from && w.date <= date).sort((a, b) => a.date.localeCompare(b.date));
+  const span = ws.length ? dayNo(ws.at(-1).date) - dayNo(ws[0].date) : 0, intakes = [];
+  for (let i = ADAPT.window; i >= 0; i--) {
+    const d = shiftDay(date, -i), meals = state.meals.filter(m => m.date === d), complete = dayStatus(state, d) === 'complete';
+    if ((i === 0 && !complete) || (!meals.length && !complete) || meals.some(m => m.kcal == null)) continue;
+    intakes.push(meals.reduce((s, m) => s + m.kcal, 0));
+  }
+  const need = { intakeDays: Math.max(0, ADAPT.minIntakeDays - intakes.length), weighIns: Math.max(0, ADAPT.minWeighIns - ws.length), span: Math.max(0, ADAPT.minSpan - span) };
+  const base = { intakeDays: intakes.length, weighIns: ws.length, span, need };
+  if (need.intakeDays || need.weighIns || need.span) return { ready: false, ...base };
+  const xs = ws.map(w => dayNo(w.date)), mx = xs.reduce((s, x) => s + x, 0) / xs.length, my = ws.reduce((s, w) => s + w.kg, 0) / ws.length;
+  const slope = xs.reduce((s, x, i) => s + (x - mx) * (ws[i].kg - my), 0) / xs.reduce((s, x) => s + (x - mx) ** 2, 0);
+  const intake = intakes.reduce((s, v) => s + v, 0) / intakes.length;
+  return { ready: true, ...base, intake, weekly: slope * 7, tdee: intake - slope * KCAL_PER_KG };
+}
+// measured：記録からの消費カロリー。計算式の0.6〜1.6倍に収まるときだけ採用する（記録漏れなどで極端な値になった場合は計算式に戻す）。
+export function computePlan(plan, kg, date, measured = null) {
+  const bmr = 10 * kg + 6.25 * plan.height - 5 * plan.age + (plan.sex === 'male' ? 5 : -161), formula = bmr * ACTIVITY[plan.activity];
+  const useMeasured = measured != null && measured >= formula * 0.6 && measured <= formula * 1.6, tdee = useMeasured ? measured : formula;
   const diff = plan.targetKg - kg, mode = Math.abs(diff) < 0.1 ? 'maintain' : diff < 0 ? 'lose' : 'gain';
   let delta = mode === 'maintain' ? 0 : plan.pace * KCAL_PER_KG / 7, limited = false;
   // 減量でも基礎代謝は下回らないようにし、その分ペースを落として日数を計算する。
@@ -83,7 +105,7 @@ export function computePlan(plan, kg, date) {
   // PFCの目安：たんぱく質は体重1kgあたり2g、脂質はカロリーの25%、残りを炭水化物。
   const p = Math.round(kg * 2), f = Math.round(kcal * 0.25 / 9), c = Math.max(0, Math.round((kcal - p * 4 - f * 9) / 4));
   const total = plan.targetKg - plan.startKg, progress = total === 0 ? 1 : Math.min(1, Math.max(0, (kg - plan.startKg) / total));
-  return { mode, kg, bmr, tdee, kcal, p, f, c, pace, limited, days, eta: mode === 'maintain' ? null : shiftDay(date, days), remaining: diff, progress };
+  return { mode, kg, bmr, tdee, formula, useMeasured, rejected: measured != null && !useMeasured, kcal, p, f, c, pace, limited, days, eta: mode === 'maintain' ? null : shiftDay(date, days), remaining: diff, progress };
 }
 // 直近2週間の実際のペース（kg/週）。両端の7日トレンドがそろうときだけ。
 export function weeklyChange(state, date) {
@@ -179,6 +201,9 @@ export function sampleState(date) {
   s.goals=[{id:uid(),date:shiftDay(date,-30),mode:'lose',kcal:2200,p:150,f:65,c:254}];
   s.settings.plan={targetKg:76,pace:0.5,sex:'male',age:30,height:172,activity:'moderate',startKg:80.9,startDate:shiftDay(date,-20)};
   for(const [i,amount,slot] of [[0,60,'朝食'],[3,1,'朝食'],[1,180,'昼食'],[2,200,'昼食']]) { const f=s.foods[i]; s.meals.push({...f,...scaleFood(f,amount),id:uid(),foodId:f.id,date,amount,slot}); }
+  // 過去20日分の食事（記録からの消費カロリー補正を確かめるため）。
+  const today=[...s.meals];
+  for(let i=20;i>=1;i--){const d=shiftDay(date,-i);s.meals.push(...today.map(m=>({...m,id:uid(),date:d})),{id:uid(),foodId:null,date:d,slot:'夕食',name:'鮭の定食',base:1,unit:'食',amount:1,kcal:1350+(i%3)*60,p:45,f:40,c:190});}
   s.exercises=[['胸','ベンチプレス'],['胸','ダンベルフライ'],['背中','ラットプルダウン'],['背中','デッドリフト'],['肩','ショルダープレス'],['脚','スクワット']].map(([category,name])=>({id:uid(),name,category,mode:'weighted'}));
   const pick=category=>s.exercises.filter(x=>x.category===category).map(x=>x.id);
   s.templates=[['胸の日','胸'],['背中の日','背中'],['肩の日','肩'],['脚の日','脚']].map(([name,category])=>({id:uid(),name,exerciseIds:pick(category)}));
