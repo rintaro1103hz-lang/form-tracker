@@ -1,4 +1,4 @@
-const CACHE='form-shell-v5';
+const CACHE='form-shell-v6';
 const FILES=['./','./index.html','./style.css','./app.js','./core.js','./storage.js','./fooddb.js','./foods-jp.json','./manifest.webmanifest','./icon.svg','./icon-192.png','./icon-512.png'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES))));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('form-shell-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
