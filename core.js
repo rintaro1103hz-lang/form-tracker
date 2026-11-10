@@ -195,6 +195,25 @@ const numberOK = (x,positive=false) => typeof x==='number' && Number.isFinite(x)
 const textOK = x => typeof x==='string' && x.length>0 && x.length<=500;
 const shortOK = x => textOK(x) && x.length<=20;
 const idOK = x => typeof x==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(x);
+// 見た目の設定：テーマ（自動・ライト・ダーク）、アクセントカラー、今日の画面のカードの順番と表示。
+export const THEMES = ['auto', 'light', 'dark'];
+export const ACCENTS = ['mono', 'blue', 'green', 'orange', 'red', 'purple'];
+export const TODAY_CARDS = ['nutrition', 'supplement', 'meals', 'weight', 'workout', 'week'];
+// 保存値を補って返す。未知のカードは捨て、新しく増えたカードは末尾に表示ありで足す。
+export function appearance(settings) {
+  const a = isObject(settings?.appearance) ? settings.appearance : {}, seen = new Set();
+  const cards = (Array.isArray(a.cards) ? a.cards : []).filter(c => isObject(c) && TODAY_CARDS.includes(c.id) && !seen.has(c.id) && seen.add(c.id)).map(c => ({ id: c.id, visible: c.visible !== false }));
+  for (const id of TODAY_CARDS) if (!seen.has(id)) cards.push({ id, visible: true });
+  return { theme: THEMES.includes(a.theme) ? a.theme : 'auto', accent: ACCENTS.includes(a.accent) ? a.accent : 'mono', cards };
+}
+export function moveCard(cards, id, dir) {
+  const next = cards.map(c => ({ ...c })), i = next.findIndex(c => c.id === id), j = i + dir;
+  if (i < 0 || j < 0 || j >= next.length) return next;
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+const appearanceOK = a => isObject(a) && (a.theme === undefined || THEMES.includes(a.theme)) && (a.accent === undefined || ACCENTS.includes(a.accent))
+  && (a.cards === undefined || (Array.isArray(a.cards) && a.cards.every(c => isObject(c) && TODAY_CARDS.includes(c.id) && typeof c.visible === 'boolean') && new Set(a.cards.map(c => c.id)).size === a.cards.length));
 export const planOK = p => isObject(p) && numberOK(p.targetKg, true) && p.targetKg <= 1000 && numberOK(p.pace, true) && p.pace <= 2 && ['male', 'female'].includes(p.sex)
   && Number.isInteger(p.age) && p.age >= 10 && p.age <= 120 && numberOK(p.height) && p.height >= 100 && p.height <= 250 && Object.hasOwn(ACTIVITY, p.activity)
   && numberOK(p.startKg, true) && p.startKg <= 1000 && dateOK(p.startDate);
@@ -207,6 +226,7 @@ export function validateBackup(input) {
   const keys=['foods','meals','days','weights','goals','exercises','templates','sessions','supplements','supplementLogs','mealSets'];
   if (!d || keys.some(k=>!Array.isArray(d[k])||d[k].length>100000) || !d.settings || Array.isArray(d.settings) || typeof d.settings!=='object') fail();
   if (d.settings.plan !== undefined && !planOK(d.settings.plan)) fail();
+  if (d.settings.appearance !== undefined && !appearanceOK(d.settings.appearance)) fail();
   const ids={};
   for (const k of keys) {
     ids[k]=new Set();

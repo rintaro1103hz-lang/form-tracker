@@ -10,6 +10,12 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./style.css">
+  <script>
+    // 見た目の設定を描画前に反映して、起動時のちらつきを防ぐ（正式な値は記録側にあり、読み込み後に上書きされる）。
+    try { const a = JSON.parse(localStorage.getItem('form-appearance') || '{}'), r = document.documentElement;
+      if (['light', 'dark'].includes(a.theme)) r.dataset.theme = a.theme;
+      if (['blue', 'green', 'orange', 'red', 'purple'].includes(a.accent)) r.dataset.accent = a.accent; } catch {}
+  </script>
   <title>Form — 食事とからだの記録</title>
 </head>
 <body>
