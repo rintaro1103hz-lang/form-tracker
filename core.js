@@ -3,24 +3,49 @@ export const uid = () => crypto.randomUUID();
 export const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 export const shiftDay = (date, n) => { const d = new Date(`${date}T12:00:00`); d.setDate(d.getDate()+n); return localDate(d); };
 export const emptyState = () => ({ foods: [], meals: [], days: [], weights: [], goals: [], exercises: [], templates: [], sessions: [], supplements: [], supplementLogs: [], settings: {} });
-export const MAX_DOSES = 10;
-// 旧バージョン（サプリ機能追加前）の保存データに、空のサプリ記録を補う。元のオブジェクトは変更しない。
-export const migrate = state => ({ ...state, supplements: state.supplements ?? [], supplementLogs: state.supplementLogs ?? [] });
+export const SLOTS = ['朝', '昼', '晩'];
+export const MAX_AMOUNT = 1000;
+const isObject = x => x && typeof x === 'object' && !Array.isArray(x);
+// 旧形式の保存データ・バックアップを現在の形式に読み替える。元のオブジェクトは変更しない。
+// ・サプリ：「1日の回数」だけの形式 → 朝・昼・晩ごとの量（1回→朝、2回→朝・晩、3回以上→朝・昼・晩）
+// ・種目：ジャンルなし → 「その他」
+function upgrade(state) {
+  const next = { ...state }, oldSlots = new Map();
+  if (Array.isArray(next.supplements)) next.supplements = next.supplements.map(s => {
+    if (!isObject(s) || 'doses' in s || !('timesPerDay' in s)) return s;
+    const slots = s.timesPerDay >= 3 ? SLOTS : s.timesPerDay === 2 ? ['朝', '晩'] : ['朝'];
+    oldSlots.set(s.id, slots);
+    return { id: s.id, name: s.name, active: s.active, unit: '個', doses: Object.fromEntries(SLOTS.map(k => [k, slots.includes(k) ? 1 : 0])) };
+  });
+  if (Array.isArray(next.supplementLogs)) next.supplementLogs = next.supplementLogs.flatMap(l => {
+    if (!isObject(l) || 'slot' in l || !('taken' in l)) return [l];
+    return (oldSlots.get(l.supplementId) ?? SLOTS).slice(0, l.taken).map((slot, i) => ({ id: i ? `${l.id}-${i}` : l.id, date: l.date, supplementId: l.supplementId, slot, amount: 1, unit: '個' }));
+  });
+  if (Array.isArray(next.exercises)) next.exercises = next.exercises.map(e => isObject(e) && !('category' in e) ? { ...e, category: 'その他' } : e);
+  return next;
+}
+const withSupplements = state => ({ ...state, supplements: state.supplements ?? [], supplementLogs: state.supplementLogs ?? [] });
+export const migrate = state => upgrade(withSupplements(state));
+export const plannedSlots = supplement => SLOTS.filter(k => supplement.doses[k] > 0);
 export function supplementDay(state, date) {
   const logs = state.supplementLogs.filter(l => l.date === date);
-  return state.supplements.map(s => ({ supplement: s, log: logs.find(l => l.supplementId === s.id) }))
-    .filter(r => r.supplement.active || r.log)
-    .map(r => ({ supplement: r.supplement, taken: r.log?.taken ?? 0, target: r.log?.target ?? r.supplement.timesPerDay }));
+  return SLOTS.map(slot => ({ slot, items: state.supplements.map(s => {
+    const log = logs.find(l => l.supplementId === s.id && l.slot === slot);
+    if (!log && !(s.active && s.doses[slot] > 0)) return null;
+    return { supplement: s, taken: !!log, amount: log ? log.amount : s.doses[slot], unit: log ? log.unit : s.unit };
+  }).filter(Boolean) }));
 }
-export function toggleDose(state, date, supplementId, index) {
+export function toggleDose(state, date, supplementId, slot) {
   const s = state.supplements.find(x => x.id === supplementId);
-  if (!s) throw new Error('サプリメントが見つかりません。');
-  const old = state.supplementLogs.find(l => l.date === date && l.supplementId === supplementId);
-  const target = Math.max(s.timesPerDay, old?.taken ?? 0), current = old?.taken ?? 0;
-  const taken = Math.min(target, Math.max(0, index < current ? current - 1 : current + 1));
-  state.supplementLogs = state.supplementLogs.filter(l => l !== old);
-  if (taken > 0) state.supplementLogs.push({ id: old?.id || uid(), date, supplementId, taken, target });
-  return taken;
+  if (!s || !SLOTS.includes(slot)) throw new Error('サプリメントが見つかりません。');
+  const old = state.supplementLogs.find(l => l.date === date && l.supplementId === supplementId && l.slot === slot);
+  if (old) { state.supplementLogs = state.supplementLogs.filter(l => l !== old); return false; }
+  if (!(s.doses[slot] > 0)) throw new Error('この時間帯には設定されていません。');
+  state.supplementLogs.push({ id: uid(), date, supplementId, slot, amount: s.doses[slot], unit: s.unit });
+  return true;
+}
+export function takeAll(state, date, slot) {
+  for (const item of supplementDay(state, date).find(g => g.slot === slot).items) if (!item.taken) toggleDose(state, date, item.supplement.id, slot);
 }
 export const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
 export const nutrients = ['kcal','p','f','c'];
@@ -42,18 +67,19 @@ export function previousSets(state, exerciseId, date) {
   const session=[...state.sessions].filter(s=>s.date<date && s.complete && s.sets.some(x=>x.exerciseId===exerciseId)).sort((a,b)=>b.date.localeCompare(a.date)||b.updatedAt.localeCompare(a.updatedAt))[0];
   return session ? {date:session.date,sets:session.sets.filter(x=>x.exerciseId===exerciseId)} : null;
 }
-export function makeBackup(state) { return { format: FORMAT, schemaVersion: 2, exportedAt: new Date().toISOString(), data: structuredClone(state) }; }
+export function makeBackup(state) { return { format: FORMAT, schemaVersion: 3, exportedAt: new Date().toISOString(), data: structuredClone(state) }; }
 const fail = () => { throw new Error('データの形式・値・参照先に問題があります。記録は変更していません。'); };
 const dateOK = x => typeof x==='string' && /^\d{4}-\d{2}-\d{2}$/.test(x) && !Number.isNaN(Date.parse(x)) && new Date(`${x}T12:00:00Z`).toISOString().slice(0,10)===x;
 const numberOK = (x,positive=false) => typeof x==='number' && Number.isFinite(x) && (positive ? x>0 : x>=0);
 const textOK = x => typeof x==='string' && x.length>0 && x.length<=500;
+const shortOK = x => textOK(x) && x.length<=20;
 const idOK = x => typeof x==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(x);
 export function validateBackup(input) {
-  if (!input || input.format!==FORMAT || ![1,2].includes(input.schemaVersion)) throw new Error('このバックアップ形式には対応していません。KetoLogのファイルは原本のまま保管してください。');
+  if (!input || input.format!==FORMAT || ![1,2,3].includes(input.schemaVersion)) throw new Error('このバックアップ形式には対応していません。記録は変更していません。');
   if (typeof input.exportedAt!=='string' || Number.isNaN(Date.parse(input.exportedAt))) fail();
   if (!input.data || typeof input.data!=='object') fail();
-  // バージョン1（サプリ機能追加前）にはサプリの項目がないため、空として読み込む。
-  const d=input.schemaVersion===1 ? migrate(input.data) : input.data;
+  // バージョン1（サプリ機能追加前）にはサプリの項目がないため、空として読み込む。旧形式の項目は現在の形式に読み替える。
+  const d=upgrade(input.schemaVersion===1 ? withSupplements(input.data) : input.data);
   const keys=['foods','meals','days','weights','goals','exercises','templates','sessions','supplements','supplementLogs'];
   if (!d || keys.some(k=>!Array.isArray(d[k])||d[k].length>100000) || !d.settings || Array.isArray(d.settings) || typeof d.settings!=='object') fail();
   const ids={};
@@ -74,7 +100,7 @@ export function validateBackup(input) {
   for(const x of d.days) if(x.status!=='complete') fail();
   for(const x of d.weights) if(!numberOK(x.kg,true)||x.kg>1000) fail();
   for(const x of d.goals) if(!['lose','maintain','gain'].includes(x.mode)||!nutrients.every(k=>numberOK(x[k]))||x.kcal===0) fail();
-  for(const x of d.exercises) if(!textOK(x.name)||!['weighted','bodyweight'].includes(x.mode)) fail();
+  for(const x of d.exercises) if(!textOK(x.name)||!shortOK(x.category)||!['weighted','bodyweight'].includes(x.mode)) fail();
   for(const x of d.templates) if(!textOK(x.name)||!Array.isArray(x.exerciseIds)||new Set(x.exerciseIds).size!==x.exerciseIds.length||x.exerciseIds.some(id=>!ids.exercises.has(id))) fail();
   for(const x of d.sessions) {
     if(!dateOK(x.date)||!textOK(x.name)||typeof x.complete!=='boolean'||typeof x.updatedAt!=='string'||Number.isNaN(Date.parse(x.updatedAt))||!Array.isArray(x.exerciseIds)||new Set(x.exerciseIds).size!==x.exerciseIds.length||x.exerciseIds.some(id=>!ids.exercises.has(id))||!Array.isArray(x.sets)) fail();
@@ -84,12 +110,11 @@ export function validateBackup(input) {
       setIds.add(s.id);
     }
   }
-  const dosesOK=x=>Number.isInteger(x)&&x>=1&&x<=MAX_DOSES;
-  for(const x of d.supplements) if(!textOK(x.name)||!dosesOK(x.timesPerDay)||typeof x.active!=='boolean') fail();
+  for(const x of d.supplements) if(!textOK(x.name)||!shortOK(x.unit)||typeof x.active!=='boolean'||!isObject(x.doses)||Object.keys(x.doses).length!==SLOTS.length||!SLOTS.every(k=>numberOK(x.doses[k])&&x.doses[k]<=MAX_AMOUNT)||!SLOTS.some(k=>x.doses[k]>0)) fail();
   const logKeys=new Set();
   for(const x of d.supplementLogs) {
-    const key=`${x.date}|${x.supplementId}`;
-    if(!dateOK(x.date)||!ids.supplements.has(x.supplementId)||logKeys.has(key)||!dosesOK(x.target)||!dosesOK(x.taken)||x.taken>x.target) fail();
+    const key=`${x.date}|${x.supplementId}|${x.slot}`;
+    if(!dateOK(x.date)||!ids.supplements.has(x.supplementId)||!SLOTS.includes(x.slot)||logKeys.has(key)||!numberOK(x.amount,true)||x.amount>MAX_AMOUNT||!shortOK(x.unit)) fail();
     logKeys.add(key);
   }
   return structuredClone(d);
@@ -101,10 +126,11 @@ export function sampleState(date) {
   for(let i=20;i>=0;i--) s.weights.push({id:uid(),date:shiftDay(date,-i),kg:Math.round((80.2-i*-0.035+Math.sin(i)*0.23)*10)/10});
   s.goals=[{id:uid(),date:shiftDay(date,-30),mode:'lose',kcal:2200,p:150,f:65,c:254}];
   for(const [i,amount,slot] of [[0,60,'朝食'],[3,1,'朝食'],[1,180,'昼食'],[2,200,'昼食']]) { const f=s.foods[i]; s.meals.push({...f,...scaleFood(f,amount),id:uid(),foodId:f.id,date,amount,slot}); }
-  s.exercises=[{id:uid(),name:'ベンチプレス',mode:'weighted'},{id:uid(),name:'スクワット',mode:'weighted'},{id:uid(),name:'ラットプルダウン',mode:'weighted'}];
-  s.templates=[{id:uid(),name:'全身トレーニング',exerciseIds:s.exercises.map(x=>x.id)}];
-  s.sessions=[{id:uid(),name:'全身トレーニング',date:shiftDay(date,-3),updatedAt:new Date().toISOString(),complete:true,exerciseIds:s.exercises.map(x=>x.id),sets:s.exercises.flatMap((x,i)=>[0,1,2].map(()=>({id:uid(),exerciseId:x.id,kg:[50,70,40][i],reps:10})))}];
-  s.supplements=[['クレアチン',1],['プロテイン',2],['マルチビタミン',1]].map(([name,timesPerDay])=>({id:uid(),name,timesPerDay,active:true}));
-  for(let i=6;i>=1;i--) for(const x of s.supplements) { const taken=Math.max(0,x.timesPerDay-(i%3===0?1:0)); if(taken) s.supplementLogs.push({id:uid(),date:shiftDay(date,-i),supplementId:x.id,taken,target:x.timesPerDay}); }
+  s.exercises=[['胸','ベンチプレス'],['胸','ダンベルフライ'],['背中','ラットプルダウン'],['背中','デッドリフト'],['肩','ショルダープレス'],['脚','スクワット']].map(([category,name])=>({id:uid(),name,category,mode:'weighted'}));
+  const pick=category=>s.exercises.filter(x=>x.category===category).map(x=>x.id);
+  s.templates=[['胸の日','胸'],['背中の日','背中'],['肩の日','肩'],['脚の日','脚']].map(([name,category])=>({id:uid(),name,exerciseIds:pick(category)}));
+  s.sessions=[{id:uid(),name:'胸の日',date:shiftDay(date,-3),updatedAt:new Date().toISOString(),complete:true,exerciseIds:pick('胸'),sets:pick('胸').flatMap((id,i)=>[0,1,2].map(()=>({id:uid(),exerciseId:id,kg:[50,14][i],reps:10})))}];
+  s.supplements=[['クレアチン','g',5,0,0],['プロテイン','杯',1,0,1],['マルチビタミン','粒',2,0,0],['マグネシウム','粒',0,0,2]].map(([name,unit,...d])=>({id:uid(),name,unit,active:true,doses:Object.fromEntries(SLOTS.map((k,i)=>[k,d[i]]))}));
+  for(let i=6;i>=1;i--) for(const x of s.supplements) for(const slot of plannedSlots(x)) if(!(i%3===0&&slot==='晩')) s.supplementLogs.push({id:uid(),date:shiftDay(date,-i),supplementId:x.id,slot,amount:x.doses[slot],unit:x.unit});
   return s;
 }
