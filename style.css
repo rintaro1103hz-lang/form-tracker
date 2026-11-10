@@ -395,3 +395,5 @@ details.manual summary{cursor:pointer;font-size:14px;font-weight:600;min-height:
   footer{margin:28px 0 0}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+.set-actions{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;margin-top:10px}
+.set-actions .secondary{font-variant-numeric:tabular-nums}
