@@ -63,6 +63,33 @@ export function trendAt(weights,date) {
   const rows=weights.filter(w=>w.date>=shiftDay(date,-6)&&w.date<=date);
   return rows.length>=3 ? {value:rows.reduce((s,w)=>s+w.kg,0)/rows.length,count:rows.length} : null;
 }
+// 体重の目標：消費カロリーを Mifflin-St Jeor式 × 活動量で推定し、目標ペースの分を増減して1日の摂取カロリーと達成日を出す。
+export const ACTIVITY = { low: 1.2, light: 1.375, moderate: 1.55, high: 1.725 };
+export const KCAL_PER_KG = 7200;
+// 計算に使う体重：7日トレンドがあればそれ、なければ直近の実測。
+export function currentWeight(state, date) {
+  const t = trendAt(state.weights, date);
+  if (t) return t.value;
+  return state.weights.filter(w => w.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0]?.kg ?? null;
+}
+export function computePlan(plan, kg, date) {
+  const bmr = 10 * kg + 6.25 * plan.height - 5 * plan.age + (plan.sex === 'male' ? 5 : -161), tdee = bmr * ACTIVITY[plan.activity];
+  const diff = plan.targetKg - kg, mode = Math.abs(diff) < 0.1 ? 'maintain' : diff < 0 ? 'lose' : 'gain';
+  let delta = mode === 'maintain' ? 0 : plan.pace * KCAL_PER_KG / 7, limited = false;
+  // 減量でも基礎代謝は下回らないようにし、その分ペースを落として日数を計算する。
+  if (mode === 'lose' && tdee - delta < bmr) { delta = tdee - bmr; limited = true; }
+  const kcal = Math.round((tdee + (mode === 'lose' ? -delta : delta)) / 10) * 10, pace = delta * 7 / KCAL_PER_KG;
+  const days = mode === 'maintain' ? 0 : Math.ceil(Math.abs(diff) / pace * 7);
+  // PFCの目安：たんぱく質は体重1kgあたり2g、脂質はカロリーの25%、残りを炭水化物。
+  const p = Math.round(kg * 2), f = Math.round(kcal * 0.25 / 9), c = Math.max(0, Math.round((kcal - p * 4 - f * 9) / 4));
+  const total = plan.targetKg - plan.startKg, progress = total === 0 ? 1 : Math.min(1, Math.max(0, (kg - plan.startKg) / total));
+  return { mode, kg, bmr, tdee, kcal, p, f, c, pace, limited, days, eta: mode === 'maintain' ? null : shiftDay(date, days), remaining: diff, progress };
+}
+// 直近2週間の実際のペース（kg/週）。両端の7日トレンドがそろうときだけ。
+export function weeklyChange(state, date) {
+  const now = trendAt(state.weights, date), before = trendAt(state.weights, shiftDay(date, -14));
+  return now && before ? (now.value - before.value) / 2 : null;
+}
 export function previousSets(state, exerciseId, date) {
   const session=[...state.sessions].filter(s=>s.date<date && s.complete && s.sets.some(x=>x.exerciseId===exerciseId)).sort((a,b)=>b.date.localeCompare(a.date)||b.updatedAt.localeCompare(a.updatedAt))[0];
   return session ? {date:session.date,sets:session.sets.filter(x=>x.exerciseId===exerciseId)} : null;
@@ -95,6 +122,9 @@ const numberOK = (x,positive=false) => typeof x==='number' && Number.isFinite(x)
 const textOK = x => typeof x==='string' && x.length>0 && x.length<=500;
 const shortOK = x => textOK(x) && x.length<=20;
 const idOK = x => typeof x==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(x);
+export const planOK = p => isObject(p) && numberOK(p.targetKg, true) && p.targetKg <= 1000 && numberOK(p.pace, true) && p.pace <= 2 && ['male', 'female'].includes(p.sex)
+  && Number.isInteger(p.age) && p.age >= 10 && p.age <= 120 && numberOK(p.height) && p.height >= 100 && p.height <= 250 && Object.hasOwn(ACTIVITY, p.activity)
+  && numberOK(p.startKg, true) && p.startKg <= 1000 && dateOK(p.startDate);
 export function validateBackup(input) {
   if (!input || input.format!==FORMAT || ![1,2,3].includes(input.schemaVersion)) throw new Error('このバックアップ形式には対応していません。記録は変更していません。');
   if (typeof input.exportedAt!=='string' || Number.isNaN(Date.parse(input.exportedAt))) fail();
@@ -103,6 +133,7 @@ export function validateBackup(input) {
   const d=upgrade(input.schemaVersion===1 ? withSupplements(input.data) : input.data);
   const keys=['foods','meals','days','weights','goals','exercises','templates','sessions','supplements','supplementLogs'];
   if (!d || keys.some(k=>!Array.isArray(d[k])||d[k].length>100000) || !d.settings || Array.isArray(d.settings) || typeof d.settings!=='object') fail();
+  if (d.settings.plan !== undefined && !planOK(d.settings.plan)) fail();
   const ids={};
   for (const k of keys) {
     ids[k]=new Set();
@@ -146,6 +177,7 @@ export function sampleState(date) {
   s.foods=foods.map(([name,base,unit,kcal,p,f,c])=>({id:uid(),name,base,unit,kcal,p,f,c,favorite:true}));
   for(let i=20;i>=0;i--) s.weights.push({id:uid(),date:shiftDay(date,-i),kg:Math.round((80.2-i*-0.035+Math.sin(i)*0.23)*10)/10});
   s.goals=[{id:uid(),date:shiftDay(date,-30),mode:'lose',kcal:2200,p:150,f:65,c:254}];
+  s.settings.plan={targetKg:76,pace:0.5,sex:'male',age:30,height:172,activity:'moderate',startKg:80.9,startDate:shiftDay(date,-20)};
   for(const [i,amount,slot] of [[0,60,'朝食'],[3,1,'朝食'],[1,180,'昼食'],[2,200,'昼食']]) { const f=s.foods[i]; s.meals.push({...f,...scaleFood(f,amount),id:uid(),foodId:f.id,date,amount,slot}); }
   s.exercises=[['胸','ベンチプレス'],['胸','ダンベルフライ'],['背中','ラットプルダウン'],['背中','デッドリフト'],['肩','ショルダープレス'],['脚','スクワット']].map(([category,name])=>({id:uid(),name,category,mode:'weighted'}));
   const pick=category=>s.exercises.filter(x=>x.category===category).map(x=>x.id);
