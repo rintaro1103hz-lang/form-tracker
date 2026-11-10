@@ -67,6 +67,27 @@ export function previousSets(state, exerciseId, date) {
   const session=[...state.sessions].filter(s=>s.date<date && s.complete && s.sets.some(x=>x.exerciseId===exerciseId)).sort((a,b)=>b.date.localeCompare(a.date)||b.updatedAt.localeCompare(a.updatedAt))[0];
   return session ? {date:session.date,sets:session.sets.filter(x=>x.exerciseId===exerciseId)} : null;
 }
+// 推定1RM（Epley式：重量 ×（1 + 回数 / 30）、1回なら重量そのもの）。回数が多いほど誤差が増えるため1〜12回に限る。
+export const E1RM_MAX_REPS = 12;
+export function estimate1RM(kg, reps) {
+  if (!(kg > 0) || !Number.isInteger(reps) || reps < 1 || reps > E1RM_MAX_REPS) return null;
+  return reps === 1 ? kg : kg * (1 + reps / 30);
+}
+export function bestSet(sets) {
+  return sets.map(s => ({ set: s, value: estimate1RM(s.kg, s.reps) })).filter(x => x.value != null).sort((a, b) => b.value - a.value)[0] ?? null;
+}
+// 種目ごとの推定1RMの推移（日付ごとの最大値）。自重種目は追加重量しか記録しないため対象外。
+export function e1rmHistory(state, exerciseId) {
+  const ex = state.exercises.find(e => e.id === exerciseId);
+  if (!ex || ex.mode !== 'weighted') return [];
+  const byDate = new Map();
+  for (const s of state.sessions) {
+    const best = bestSet(s.sets.filter(x => x.exerciseId === exerciseId));
+    if (best && !(byDate.get(s.date)?.value >= best.value)) byDate.set(s.date, { date: s.date, ...best });
+  }
+  let record = 0;
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)).map(x => { const pr = x.value > record; if (pr) record = x.value; return { ...x, pr }; });
+}
 export function makeBackup(state) { return { format: FORMAT, schemaVersion: 3, exportedAt: new Date().toISOString(), data: structuredClone(state) }; }
 const fail = () => { throw new Error('データの形式・値・参照先に問題があります。記録は変更していません。'); };
 const dateOK = x => typeof x==='string' && /^\d{4}-\d{2}-\d{2}$/.test(x) && !Number.isNaN(Date.parse(x)) && new Date(`${x}T12:00:00Z`).toISOString().slice(0,10)===x;
@@ -129,7 +150,11 @@ export function sampleState(date) {
   s.exercises=[['胸','ベンチプレス'],['胸','ダンベルフライ'],['背中','ラットプルダウン'],['背中','デッドリフト'],['肩','ショルダープレス'],['脚','スクワット']].map(([category,name])=>({id:uid(),name,category,mode:'weighted'}));
   const pick=category=>s.exercises.filter(x=>x.category===category).map(x=>x.id);
   s.templates=[['胸の日','胸'],['背中の日','背中'],['肩の日','肩'],['脚の日','脚']].map(([name,category])=>({id:uid(),name,exerciseIds:pick(category)}));
-  s.sessions=[{id:uid(),name:'胸の日',date:shiftDay(date,-3),updatedAt:new Date().toISOString(),complete:true,exerciseIds:pick('胸'),sets:pick('胸').flatMap((id,i)=>[0,1,2].map(()=>({id:uid(),exerciseId:id,kg:[50,14][i],reps:10})))}];
+  // 約5週間分。少しずつ重量が伸びていく記録（推定1RMの推移を確かめるため）。
+  for(let w=9;w>=1;w--) for(const [name,cat,base,step,off] of [['胸の日','胸',[50,12],[1.25,0.5],0],['背中の日','背中',[45,80],[1.25,2.5],1],['脚の日','脚',[70],[2.5],2]]) {
+    const ids=pick(cat);
+    s.sessions.push({id:uid(),name,date:shiftDay(date,-(w*4+off)),updatedAt:new Date().toISOString(),complete:true,exerciseIds:ids,sets:ids.flatMap((id,i)=>[10,8,8].map(reps=>({id:uid(),exerciseId:id,kg:base[i]+step[i]*(9-w),reps})))});
+  }
   s.supplements=[['クレアチン','g',5,0,0],['プロテイン','杯',1,0,1],['マルチビタミン','粒',2,0,0],['マグネシウム','粒',0,0,2]].map(([name,unit,...d])=>({id:uid(),name,unit,active:true,doses:Object.fromEntries(SLOTS.map((k,i)=>[k,d[i]]))}));
   for(let i=6;i>=1;i--) for(const x of s.supplements) for(const slot of plannedSlots(x)) if(!(i%3===0&&slot==='晩')) s.supplementLogs.push({id:uid(),date:shiftDay(date,-i),supplementId:x.id,slot,amount:x.doses[slot],unit:x.unit});
   return s;
