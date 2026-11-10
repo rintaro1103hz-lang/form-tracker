@@ -2,7 +2,7 @@ export const FORMAT = 'form-personal-backup';
 export const uid = () => crypto.randomUUID();
 export const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 export const shiftDay = (date, n) => { const d = new Date(`${date}T12:00:00`); d.setDate(d.getDate()+n); return localDate(d); };
-export const emptyState = () => ({ foods: [], meals: [], days: [], weights: [], goals: [], exercises: [], templates: [], sessions: [], supplements: [], supplementLogs: [], settings: {} });
+export const emptyState = () => ({ foods: [], meals: [], days: [], weights: [], goals: [], exercises: [], templates: [], sessions: [], supplements: [], supplementLogs: [], mealSets: [], settings: {} });
 export const SLOTS = ['朝', '昼', '晩'];
 export const MAX_AMOUNT = 1000;
 const isObject = x => x && typeof x === 'object' && !Array.isArray(x);
@@ -22,9 +22,60 @@ function upgrade(state) {
     return (oldSlots.get(l.supplementId) ?? SLOTS).slice(0, l.taken).map((slot, i) => ({ id: i ? `${l.id}-${i}` : l.id, date: l.date, supplementId: l.supplementId, slot, amount: 1, unit: '個' }));
   });
   if (Array.isArray(next.exercises)) next.exercises = next.exercises.map(e => isObject(e) && !('category' in e) ? { ...e, category: 'その他' } : e);
+  // 食事のセット（いつもの組み合わせ）は後から追加した項目なので、ない場合は空として扱う。
+  if (!('mealSets' in next)) next.mealSets = [];
   return next;
 }
 const withSupplements = state => ({ ...state, supplements: state.supplements ?? [], supplementLogs: state.supplementLogs ?? [] });
+// 食事のセット：その日の食事をまとめて保存し、別の日に一度で記録する。値は保存したときの分量のまま。
+const MEAL_ITEM_KEYS = ['name', 'base', 'unit', 'amount', 'kcal', 'p', 'f', 'c', 'foodId'];
+export const mealSetItem = meal => Object.fromEntries(MEAL_ITEM_KEYS.map(k => [k, meal[k] ?? null]));
+export function addMealSet(state, setId, date, slot) {
+  const set = state.mealSets.find(x => x.id === setId);
+  if (!set) throw new Error('セットが見つかりません。');
+  state.meals.push(...set.items.map(item => ({ ...item, foodId: item.foodId && state.foods.some(f => f.id === item.foodId) ? item.foodId : null, id: uid(), date, slot })));
+  markPartial(state, date);
+  return set.items.length;
+}
+// 種目の削除：プリセットと過去の記録からも取り除く（記録に残すと参照切れになるため）。消えるセット数を返す。
+export function deleteExercise(state, id) {
+  let removed = 0;
+  state.exercises = state.exercises.filter(e => e.id !== id);
+  state.templates = state.templates.map(t => ({ ...t, exerciseIds: t.exerciseIds.filter(x => x !== id) })).filter(t => t.exerciseIds.length);
+  state.sessions = state.sessions.map(s => { const sets = s.sets.filter(x => x.exerciseId !== id); removed += s.sets.length - sets.length; return { ...s, exerciseIds: s.exerciseIds.filter(x => x !== id), sets }; });
+  return removed;
+}
+export const exerciseUsage = (state, id) => state.sessions.reduce((n, s) => n + s.sets.filter(x => x.exerciseId === id).length, 0);
+// 指定日までの7日間の、部位（ジャンル）ごとのセット数。
+export function categorySets(state, date) {
+  const from = shiftDay(date, -6), counts = new Map();
+  for (const s of state.sessions) if (s.date >= from && s.date <= date) for (const x of s.sets) {
+    const c = state.exercises.find(e => e.id === x.exerciseId)?.category;
+    if (c) counts.set(c, (counts.get(c) ?? 0) + 1);
+  }
+  return [...counts].map(([category, sets]) => ({ category, sets })).sort((a, b) => b.sets - a.sets);
+}
+// 指定日までの7日間のふりかえり。前の7日間と比べられるよう、同じ形で返す。
+export function weekSummary(state, date) {
+  const days = Array.from({ length: 7 }, (_, i) => shiftDay(date, i - 6)), start = days[0], inWeek = d => d >= start && d <= date;
+  const logged = days.filter(d => state.meals.some(m => m.date === d) || dayStatus(state, d) === 'complete');
+  const totals = logged.map(d => totalMeals(state.meals.filter(m => m.date === d)));
+  const avg = k => totals.length ? totals.reduce((s, t) => s + t[k].value, 0) / totals.length : null;
+  const goals = logged.map(d => goalFor(state, d)?.kcal).filter(Boolean);
+  const now = trendAt(state.weights, date), before = trendAt(state.weights, shiftDay(date, -7));
+  const sessions = state.sessions.filter(s => inWeek(s.date) && s.sets.length);
+  // サプリの登録日は持っていないため、初めて飲んだ日より前は「飲み忘れ」に数えない。
+  const firstLog = id => state.supplementLogs.filter(l => l.supplementId === id).reduce((m, l) => (!m || l.date < m ? l.date : m), null);
+  const supp = days.flatMap(d => supplementDay(state, d).flatMap(g => g.items).filter(x => { const f = firstLog(x.supplement.id); return f && d >= f; }));
+  const prs = state.exercises.flatMap(e => e1rmHistory(state, e.id).filter((h, i) => i > 0 && h.pr && inWeek(h.date)).map(h => ({ name: e.name, value: h.value, date: h.date })));
+  return {
+    start, end: date, loggedDays: logged.length, kcal: avg('kcal'), p: avg('p'), f: avg('f'), c: avg('c'),
+    goalKcal: goals.length ? goals.reduce((s, v) => s + v, 0) / goals.length : null,
+    weight: now?.value ?? null, weightChange: now && before ? now.value - before.value : null, weighIns: state.weights.filter(w => inWeek(w.date)).length,
+    workouts: sessions.length, sets: sessions.reduce((s, x) => s + x.sets.length, 0),
+    suppTaken: supp.filter(x => x.taken).length, suppTotal: supp.length, prs,
+  };
+}
 export const migrate = state => upgrade(withSupplements(state));
 export const plannedSlots = supplement => SLOTS.filter(k => supplement.doses[k] > 0);
 export function supplementDay(state, date) {
@@ -153,7 +204,7 @@ export function validateBackup(input) {
   if (!input.data || typeof input.data!=='object') fail();
   // バージョン1（サプリ機能追加前）にはサプリの項目がないため、空として読み込む。旧形式の項目は現在の形式に読み替える。
   const d=upgrade(input.schemaVersion===1 ? withSupplements(input.data) : input.data);
-  const keys=['foods','meals','days','weights','goals','exercises','templates','sessions','supplements','supplementLogs'];
+  const keys=['foods','meals','days','weights','goals','exercises','templates','sessions','supplements','supplementLogs','mealSets'];
   if (!d || keys.some(k=>!Array.isArray(d[k])||d[k].length>100000) || !d.settings || Array.isArray(d.settings) || typeof d.settings!=='object') fail();
   if (d.settings.plan !== undefined && !planOK(d.settings.plan)) fail();
   const ids={};
@@ -185,6 +236,10 @@ export function validateBackup(input) {
     }
   }
   for(const x of d.supplements) if(!textOK(x.name)||!shortOK(x.unit)||typeof x.active!=='boolean'||!isObject(x.doses)||Object.keys(x.doses).length!==SLOTS.length||!SLOTS.every(k=>numberOK(x.doses[k])&&x.doses[k]<=MAX_AMOUNT)||!SLOTS.some(k=>x.doses[k]>0)) fail();
+  for(const x of d.mealSets) {
+    if(!textOK(x.name)||!Array.isArray(x.items)||!x.items.length||x.items.length>50) fail();
+    for(const m of x.items) if(!isObject(m)||!textOK(m.name)||!textOK(m.unit)||!numberOK(m.base,true)||!numberOK(m.amount,true)||!nutritionOK(m)||(m.foodId!==null&&!ids.foods.has(m.foodId))) fail();
+  }
   const logKeys=new Set();
   for(const x of d.supplementLogs) {
     const key=`${x.date}|${x.supplementId}|${x.slot}`;
@@ -201,6 +256,7 @@ export function sampleState(date) {
   s.goals=[{id:uid(),date:shiftDay(date,-30),mode:'lose',kcal:2200,p:150,f:65,c:254}];
   s.settings.plan={targetKg:76,pace:0.5,sex:'male',age:30,height:172,activity:'moderate',startKg:80.9,startDate:shiftDay(date,-20)};
   for(const [i,amount,slot] of [[0,60,'朝食'],[3,1,'朝食'],[1,180,'昼食'],[2,200,'昼食']]) { const f=s.foods[i]; s.meals.push({...f,...scaleFood(f,amount),id:uid(),foodId:f.id,date,amount,slot}); }
+  s.mealSets=[{id:uid(),name:'いつもの朝食',items:s.meals.filter(m=>m.slot==='朝食').map(mealSetItem)}];
   // 過去20日分の食事（記録からの消費カロリー補正を確かめるため）。
   const today=[...s.meals];
   for(let i=20;i>=1;i--){const d=shiftDay(date,-i);s.meals.push(...today.map(m=>({...m,id:uid(),date:d})),{id:uid(),foodId:null,date:d,slot:'夕食',name:'鮭の定食',base:1,unit:'食',amount:1,kcal:1350+(i%3)*60,p:45,f:40,c:190});}

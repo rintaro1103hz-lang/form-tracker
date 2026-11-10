@@ -397,3 +397,19 @@ details.manual summary{cursor:pointer;font-size:14px;font-weight:600;min-height:
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 .set-actions{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;margin-top:10px}
 .set-actions .secondary{font-variant-numeric:tabular-nums}
+.group-actions{display:flex;align-items:center;gap:14px}
+.small-link{font-size:13px;margin-top:4px}
+.set-choice{display:flex;align-items:center;gap:8px}
+.set-choice .food-choice{flex:1;min-width:0}
+.set-choice .food-choice small{display:block}
+.set-items{margin:4px 0 8px}
+.bar-list{display:grid;gap:10px}
+.bar-row{display:grid;grid-template-columns:4.5em 1fr 2.5em;align-items:center;gap:12px;font-size:14px}
+.bar-row strong{text-align:right;font-variant-numeric:tabular-nums}
+.bar{height:8px;border-radius:8px;background:var(--fill);overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--ink);border-radius:8px}
+.week-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px 16px;margin-bottom:8px}
+.week-grid>div>strong{display:block;font-size:24px;font-weight:700;letter-spacing:-.6px;margin:2px 0;font-variant-numeric:tabular-nums}
+.week-grid strong small{font-size:13px;font-weight:500;color:var(--ink-2);margin-left:3px;letter-spacing:0}
+.week-grid>div>small{display:block;font-size:12px}
+.week-grid .diff{color:var(--ink-3);font-size:11px;margin-top:2px}
